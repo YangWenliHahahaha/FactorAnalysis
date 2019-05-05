@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Tue Apr 30 13:26:24 2019
-
-@author: yangwenli
-"""
 import time
 
 import pandas as pd
@@ -46,18 +39,15 @@ class SFPortfolio:
         gross_returns = self._hist_data[['returns', 'group'] + used_columns]
             
         returns_date = gross_returns.index.get_level_values('date')
-        portfolio_returns_between_balancing = [0] * len(self._rebalance_date)
+        portfolio_returns_between_balancing = [0] * (len(self._rebalance_date) - 1)
         
-        for i in range(len(self._rebalance_date)):
+        for i in range(len(self._rebalance_date) - 1):
             #The start and end of a period between balancing
-            if i == 0:
-                start_date, end_date = full_date[0] - Day(1), self._rebalance_date[0]
-            else:
-                start_date, end_date = self._rebalance_date[i - 1], self._rebalance_date[i]
-            if i == len(self._rebalance_date) - 1: end_date += Day(1)
+            start_date, end_date = self._rebalance_date[i], self._rebalance_date[i + 1]
+            if i == len(self._rebalance_date) - 2: end_date += Day(1)
             #history data during the period
             returns_between_balancing = gross_returns[(returns_date >= start_date) & (returns_date < end_date)]
-            returns_between_balancing = (returns_between_balancing['returns'] + 1).groupby('code', group_keys = False).cumprod()
+            returns_between_balancing = (returns_between_balancing['returns'].fillna(0) + 1).groupby('code', group_keys = False).cumprod()
             portfolio_returns_between_balancing[i] = returns_between_balancing
         
         print('_cal_portfolio_returns_between_balancing--2', time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time())))
@@ -76,13 +66,10 @@ class SFPortfolio:
         
         cum_returns = cum_returns.unstack(level = 'group')
         returns_date = cum_returns.index = cum_returns.index.get_level_values('date')
-        for i in range(len(self._rebalance_date)):
+        for i in range(len(self._rebalance_date) - 1):
             #The start and end of a period between balancing
-            if i == 0:
-                start_date, end_date = full_date[0] - Day(1), self._rebalance_date[0]
-            else:
-                start_date, end_date = self._rebalance_date[i - 1], self._rebalance_date[i]
-            if i == len(self._rebalance_date): end_date += Day(1)
+            start_date, end_date = self._rebalance_date[i], self._rebalance_date[i + 1]
+            if i == len(self._rebalance_date) - 2: end_date += Day(1)
             
             cum_returns_between_balancing = cum_returns[(returns_date >= start_date) & (returns_date < end_date)]
             returns_between_balancing = cum_returns_between_balancing.pct_change()
@@ -131,14 +118,17 @@ class SFPortfolio:
         factors_rank = factors_rank * 100 // 10  + 1
         factors_rank[factors_rank == 11] = 10
         
-        factors_rank = factors_rank.reset_index().set_index('date').groupby('code').apply(unfill)
-        try:
-            del factors_rank['code']
-        except KeyError:
-            pass
+        self._hist_data = pd.concat([self._hist_data, factors_rank], axis = 1)
+        self._hist_data['group'] = self._hist_data['group'].groupby('code', group_keys = False).fillna(method = 'ffill')
+        #factors_rank = factors_rank.reset_index().set_index('date').groupby('code').apply(unfill)
+        #try:
+        #    del factors_rank['code']
+        #except KeyError:
+        #    pass
         
-        factors_rank = factors_rank.groupby('code', group_keys = False).fillna(method = 'ffill')
-        self._group = pd.DataFrame(factors_rank)
+        #factors_rank = factors_rank.groupby('code', group_keys = False).fillna(method = 'ffill')
+        #self._group = pd.DataFrame(factors_rank)
+        self._group = self._hist_data['group']
         print('_rank_and_divide--2', time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time())))
         
     def _cal_returns(self):
@@ -151,7 +141,7 @@ class SFPortfolio:
 
         #self._rebalance_date = self._cal_rebalance_date()
         #下一条语句很慢,必须想办法优化一下
-        self._hist_data['group'] = self._group['group']
+        #self._hist_data['group'] = self._group['group']
         
         returns = self._cal_portfolio_returns_between_balancing()
         
