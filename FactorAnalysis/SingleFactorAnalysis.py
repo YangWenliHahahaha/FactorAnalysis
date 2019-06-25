@@ -17,7 +17,7 @@ ffill = lambda s:s.reindex(full_date[(full_date >= s.index[0]) & (full_date <= s
 
 class SFPortfolio:
     
-    def __init__(self, factors, hist_data, group_num = 10, balance_time = '1M', weights = 'EW'):
+    def __init__(self, factors, hist_data, group_num = 5, balance_time = '1M', weights = 'EW'):
         '''
         factors:factor value to research
         hist_data:history stock data of the whole market or some subset
@@ -66,6 +66,9 @@ class SFPortfolio:
         Calculate the cumulitive returns of every stock between two balancing
         '''
         print('_cal_portfolio_returns_between_balancing--1',time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time())))
+        if self._weights == 'MV':
+            self._hist_data['weights'] = self._hist_data['market_value']
+            
         used_columns = [] if self._weights == 'EW' else ['weights']
         gross_returns = self._hist_data[['returns', 'group'] + used_columns]
             
@@ -85,7 +88,7 @@ class SFPortfolio:
         
         cum_returns_stocks = pd.concat(portfolio_returns_between_balancing).sort_index()
         cum_returns_stocks.name = 'cum_returns'
-        cum_returns_stocks = pd.concat([cum_returns_stocks, gross_returns['group']], axis = 1)
+        cum_returns_stocks = pd.concat([cum_returns_stocks, gross_returns[['group'] + used_columns]], axis = 1)
         #Calculate the portfolio value if start from 1
         group_data = cum_returns_stocks[['cum_returns', 'group'] + used_columns].groupby(['date', 'group'])
         if self._weights == 'EW':
@@ -182,6 +185,7 @@ class SFPortfolio:
     
     def _IC(self):
         IC_data = pd.concat([self._hist_data['returns'], self._factors], axis = 1)
+        IC_data = IC_data[IC_data.returns != 0]
         IC_date_group = IC_data.groupby('date')
         Rank_IC_series = IC_date_group.corr(method = 'spearman').iloc[::2, 1]
         IC_series = IC_date_group.corr().iloc[::2, 1]
@@ -198,3 +202,29 @@ class SFPortfolio:
     
     def max_draw_down(self):
         return self._returns.fillna(0).apply(self._mdd)
+    
+if __name__ == '__main__':
+    from utils import handle_outlier, standardlize_factors, preprocess
+    hist_data = pd.read_csv('hist_data.csv')
+    hist_data['code'] = hist_data['code'].apply(lambda n:'{:0>6}'.format(n))
+    hist_data['date'] = pd.to_datetime(hist_data['date'])
+    hist_data = hist_data.set_index(['code', 'date'])
+    hist_data = hist_data.sort_index()
+    
+    code_group = hist_data['close'].groupby('code', group_keys = False)
+    month_returns = code_group.shift(1) / code_group.shift(61)
+    momentum_1Y = handle_outlier(month_returns)
+    momentum_1Y = standardlize_factors(momentum_1Y)
+    #month_returns = month_returns.groupby('code', group_keys = False).shift(1)
+    
+    market_value = hist_data['market_value'].groupby('code', group_keys = False).shift(1)
+    market_value = preprocess(market_value)
+    
+    full_date = hist_data.index.get_level_values('date').sort_values().unique()
+    #hist_data['returns'].fillna(0, inplace = True)
+    sfp = SFPortfolio(momentum_std, hist_data, 5, '1M', 'EW')
+    sfp.sharpe_ratio()
+    sfp.plot_cum()
+    sfp.IC().mean()
+    
+    
