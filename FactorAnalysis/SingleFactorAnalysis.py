@@ -2,7 +2,7 @@
 """
 Created on Fri Jun 28 12:45:03 2019
 
-@author: yangwenli
+@author: lenovo
 """
 import time
 import pickle
@@ -15,28 +15,25 @@ from pandas.tseries.offsets import Day
 
 import utils
 
-with open('full_date.pickle', 'rb') as f:
-    # The protocol version used is detected automatically, so we do not
-    # have to specify it.
-    full_date = pickle.load(f)
-
-unfill = lambda s:s.loc[full_date[(full_date >= s.index[0]) & (full_date <= s.index[-1])]]
-ffill = lambda s:s.reindex(full_date[(full_date >= s.index[0]) & (full_date <= s.index[-1])], method = 'ffill')
-#full_date = hist_data.index.get_level_values('date').sort_values().unique()
-
 class SFPortfolio:
     
-    def __init__(self, factors, hist_data, only_rebalance_date = False, subset = 'all', preprocess = True, market_value_neutral = True, industry_neutral = True, fill_value = 'mean', group_num = 5, balance_time = '1M', weights = 'EW'):
+    def __init__(self, factors, hist_data, only_rebalance_date = False, 
+                 subset = 'all', preprocess = True, market_value_neutral = True, 
+                 industry_neutral = True, fill_value = 'mean', group_num = 5, 
+                 balance_time = '1M', weights = 'EW', select_from_industry = False):
         '''
-        factors:factor value to research
-        hist_data:history stock data of the whole market or some subset
-        group_num:the number of groups dividedaccording to the factor values
-        balance_time: balance frequency
-        weights: the weights of single factor portfolio, 'EW' means equal weights
-        
-        _rebalance_date:the date to rebalance the portfolio
-        _group:stocks in every group
-        _returns:returns of every group and the long-short portfolio
+        factors: 要研究的因子数据
+        hist_data: 股票历史价量数据
+        only_rebalance_date: 因子数据是否只包含调仓日数据
+        subset：从某个行业或者指数选股
+        preprocess：是否对因子进行去极值、缺失值填充、标准化处理
+        market_value_neutral：是否对因子进行市值中性处理
+        industry_neutral:是否对因子做行业中性处理
+        fill_value：填补缺失值的方式，行业均值/行业中位数/行业最大最小值
+        group_num: 要把股票分为几组
+        balance_time: 调仓周期
+        weights: 股票权重序列，EW代表等权
+        select_from_industry:是否将股票按照行业分组
         '''
         self._factors = factors.copy()
         self._balance_time = balance_time
@@ -49,6 +46,7 @@ class SFPortfolio:
         self._fill_value = fill_value
         self._preprocess = preprocess
         self._only_rebalance_date = only_rebalance_date
+        self._select_from_industry = select_from_industry
         
         self._IC_data = None
         self._rebalance_date = self._cal_rebalance_date()
@@ -57,39 +55,38 @@ class SFPortfolio:
         self._sub_data = self._extract_rebalance_day_data()
     
     def _extract_rebalance_day_data(self):
+        '''
+        提取填仓日的因子数据和股票价格数据，并根据参数进行因子数据预处理
+        '''
         sub_date =  self._rebalance_date
         hist_data_sub = self._hist_data[self._hist_data.index.get_level_values('date').isin(sub_date)]
         
         factors_sub  = self._factors[self._factors.index.get_level_values('date').isin(sub_date)]
         factor_name = pd.DataFrame(factors_sub).columns[0]
-        if self._preprocess:
+        if self._preprocess:#因子数据预处理
             factors_sub = utils.preprocess(factors_sub, factor_name, hist_data_sub, fill_value = self._fill_value)
-        if self._market_neutral or self._industry_neutral:
+        if self._market_neutral or self._industry_neutral:#行业市值中性
             factors_sub = utils.industry_market_value_neutral(factors_sub, hist_data_sub, industry = self._industry_neutral, market_value = self._market_neutral)
             factors_sub = pd.Series(factors_sub)
             factors_sub = factors_sub.droplevel(level = 0)
             factors_sub.name = factor_name
         
-        hist_data_sub = hist_data_sub.reset_index().set_index('date').groupby('code').apply(lambda dt:dt.reindex(sub_date))
-        del hist_data_sub['code']
-        hist_data_sub.index.names = ['code',  'date']
         hist_data_sub = hist_data_sub.sort_index()
-        hist_data_sub['period_returns'] = hist_data_sub['close'].groupby('code').apply(lambda s:s.shift(-1)/s - 1)
-        hist_data_sub = hist_data_sub.dropna()
-        
-        hist_data_sub['factors'] = pd.DataFrame(factors_sub)[factor_name]
+        hist_data_sub['period_returns'] = hist_data_sub['adj_close'].groupby('code').apply(lambda s:s.shift(-1)/s - 1)
+        hist_data_sub = hist_data_sub[(hist_data_sub['is_ST'] == 0) & (hist_data_sub['is_new_stock'] == 0) & (hist_data_sub['status'] == 1)]
+        hist_data_sub = hist_data_sub.join(pd.DataFrame(factors_sub).rename(columns = {factor_name:'factors'}))
         if self._subset != 'all':
             hist_data_sub = hist_data_sub[hist_data_sub[self._subset] == 1]
         return hist_data_sub.dropna(subset = ['factors'])
     
     def _cal_rebalance_date(self):
         '''
-        Calculate the rebalance date from the trade date according to rebalance
-        frequency
+        计算调仓日期
         '''
-        if self._only_rebalance_date:
+        if self._only_rebalance_date:#如果因子值只包含调仓日数据则提取因子序列的日期index
             trade_date = self._factors.index.get_level_values('date').unique().sort_values()
             return trade_date
+        #否则从历史数据提取日期序列
         unique_date = self._hist_data.index.get_level_values('date').unique().sort_values()
         trade_date = list(unique_date[::self._balance_time])
         last_date = list(unique_date)[-1]
@@ -99,14 +96,15 @@ class SFPortfolio:
     
     def _cal_portfolio_returns_between_balancing(self):
         '''
-        Calculate the cumulitive returns of every stock between two balancing
+        计算股票组合股票组合日度收益率，速度慢
         '''
         print('_cal_portfolio_returns_between_balancing--1',time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time())))
         if self._weights == 'MV':
             self._hist_data['weights'] = self._hist_data['market_value']
             
         used_columns = [] if self._weights == 'EW' else ['weights']
-        gross_returns = self._hist_data[['returns', 'group'] + used_columns]
+        hist_data = pd.concat([self._hist_data[['returns'] + used_columns], self._group], axis = 1)
+        gross_returns = hist_data
             
         returns_date = gross_returns.index.get_level_values('date')
         portfolio_returns_between_balancing = [0] * (len(self._rebalance_date) - 1)
@@ -155,13 +153,19 @@ class SFPortfolio:
     
     def _rank_and_divide(self):
         '''
-        Divide the stocks into 10 groups according to the order of the factor
+        将因子排序并分组，每一组组成一个资产组合
         '''
         print('_rank_and_divide--1', time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time())))
 
         factors_rank = self._sub_data['factors']
-                    
-        factors_rank = factors_rank.groupby('date', group_keys = False).rank(pct = True)
+        
+        if self._select_from_industry:#按照行业排序并分组
+            factors_rank = self._sub_data[['factors', 'industry']]
+            factors_rank = factors_rank.set_index('industry', append = True)
+            factors_rank = factors_rank.groupby(['date', 'industry'], group_keys = False).rank(pct = True)
+            factors_rank = factors_rank.droplevel(level = 'industry')
+        else:#全市场排序分组
+            factors_rank = factors_rank.groupby('date', group_keys = False).rank(pct = True)
         #else:
         #    industry = self._hist_data['industry'][self._hist_data.index.get_level_values(level = 'date').isin(self._rebalance_date)]
         #    factors_rank = pd.concat([factors_rank, industry], axis = 1)
@@ -180,7 +184,7 @@ class SFPortfolio:
 	
     def _cal_returns(self):
         '''
-        Calculate the portfolio returns of every group and the long-short portfolio
+        计算每一组调仓之间的收益
         '''
         if self._group is None: self._rank_and_divide()
               
@@ -206,6 +210,7 @@ class SFPortfolio:
         return sr
     
     def turnover(self):
+        '''计算换手率'''
         weights = pd.DataFrame(self._group).dropna()
         weights['weights'] = 1
         weights = weights.reset_index().set_index(['code', 'date', 'group'])
@@ -246,6 +251,14 @@ class SFPortfolio:
         IC_data_frame.index = IC_data_frame.index.get_level_values('date')
         IC_data_frame = IC_data_frame.dropna()
         self._IC_data = IC_data_frame
+    
+    @property
+    def daily_returns(self):
+        return self._cal_portfolio_returns_between_balancing()
+    
+    @property
+    def returns(self):
+        return self._returns
     
     def IC(self):
         if self._IC_data is None:
@@ -312,9 +325,11 @@ class SFPortfolio:
         IR_by_year.plot(kind = 'bar', title = 'IR', figsize = (8, 6))
         return fig_IR
     
-    def plot_long_short_value(self, title = None):
+    def plot_long_short_value(self, title = None, start_date = None):
         #绘制多空净值图
         returns = self._returns['long_short']
+        if start_date is not None:
+            returns = returns[start_date:]
         pure_assets = (returns + 1).cumprod()
         fig_value, ax_value = plt.subplots()
         title = title if title is not None else 'Long Short Portfolio Value'
@@ -368,31 +383,3 @@ class SFPortfolio:
         print(self.plot_long_short_value())
         
         return statistics
-               
-if __name__ == '__main__':
-    hist_data = utils.read_data('hist_data.csv')
-    
-    code_group = hist_data['close'].groupby('code', group_keys = False)
-    month_returns = code_group.shift(1) / code_group.shift(22)
-    month_returns = utils.handle_outlier(month_returns)
-    #momentum_1Y = utils.standardlize_factors(momentum_1Y)
-    #month_returns = month_returns.groupby('code', group_keys = False).shift(1)
-    
-    market_value = hist_data['market_value'].groupby('code', group_keys = False).shift(1)
-    market_value = utils.handle_outlier(market_value)
-    market_value = utils.standardlize_factors(market_value)
-    #market_value = utils.preprocess(market_value)
-    
-    full_date = hist_data.index.get_level_values('date').sort_values().unique()
-    #hist_data['returns'].fillna(0, inplace = True)
-    sfp = SFPortfolio(month_returns, hist_data, True, 5, '1M', 'EW')
-    sfp2 = SFPortfolio(market_value, hist_data, False, 5, '1M', 'EW')
-    sfp.sharpe_ratio()
-    sfp2.sharpe_ratio()
-    sfp.plot_cum()
-    sfp.IC()
-    sfp2.IC()
-    sfp.IR()
-    sfp.t_values()['2008':].describe()
-
-    sfp.summary()
